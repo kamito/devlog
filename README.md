@@ -126,4 +126,4 @@ func main() {
 
 ## ライセンス
 
-サンプルにつき自由に改変してください。
+[MIT License](LICENSE)
