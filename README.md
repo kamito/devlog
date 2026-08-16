@@ -20,6 +20,7 @@ HTML としてレンダリングされて表示されます。
   HTML からの相対パス参照(`<link rel="stylesheet" href="style.css">` など)がそのまま動作
 - **GitHub 準拠**のスタイル([github-markdown-css](https://github.com/sindresorhus/github-markdown-css))と
   コードハイライト(chroma の `github` / `github-dark` 配色、ライト/ダーク自動切替)
+- ` ```mermaid ` コードブロックを [Mermaid](https://mermaid.js.org/) の図として描画
 - ファイルの追加・編集はリクエストごとに反映(再起動不要)
 
 ## 使い方
@@ -123,6 +124,34 @@ func main() {
 	fmt.Println("hello, devlog")
 }
 ```
+
+### Mermaid
+
+情報文字列に `mermaid` を指定したコードブロックは、コードとしてではなく
+[Mermaid](https://mermaid.js.org/) の図として描画されます。
+
+```mermaid
+flowchart LR
+    A[".md ファイル"] --> B["devlog"]
+    B --> C["INDEX"]
+    C --> D["詳細ページ"]
+    B -. "mermaid ブロック" .-> E(["図として描画"])
+    D --> E
+```
+
+```mermaid
+sequenceDiagram
+    participant U as ブラウザ
+    participant S as devlog
+    U->>S: GET /view/README.md
+    S->>S: Markdown を HTML に変換
+    S-->>U: HTML(mermaid ブロック入り)
+    U->>U: mermaid.js が図を描画
+```
+
+> **補足:** 描画は mermaid.js(CDN: `cdn.jsdelivr.net`)をブラウザ側で読み込んで行います。
+> スクリプトは Mermaid を含むページでのみ読み込まれます。オフライン環境では
+> 図は描画されず、記述内容がそのままテキストとして表示されます。
 
 ## ライセンス
 

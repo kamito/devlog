@@ -30,9 +30,13 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // staticFS holds the GitHub Markdown stylesheet bundled into the binary.
@@ -91,6 +95,7 @@ func main() {
 		md: goldmark.New(
 			goldmark.WithExtensions(
 				extension.GFM,
+				mermaidExt{},
 				highlighting.NewHighlighting(
 					highlighting.WithStyle("github"),
 					highlighting.WithFormatOptions(chromahtml.WithClasses(true)),
@@ -131,6 +136,84 @@ func resolveAddr(addr, host string, port int) (string, error) {
 		p = strconv.Itoa(port)
 	}
 	return net.JoinHostPort(h, p), nil
+}
+
+// Mermaid support: a ```mermaid fenced code block is handed to the mermaid.js
+// library in the browser instead of the syntax highlighter, so the diagram is
+// drawn on the detail page.
+
+// mermaidKind identifies the AST node that replaces a ```mermaid code block.
+var mermaidKind = ast.NewNodeKind("MermaidBlock")
+
+// mermaidFound is the parser-context key set while converting a document that
+// contains at least one Mermaid block; handleView reads it to decide whether
+// the page needs to load mermaid.js.
+var mermaidFound = parser.NewContextKey()
+
+// mermaidBlock carries the diagram source of a ```mermaid code block.
+type mermaidBlock struct {
+	ast.BaseBlock
+	Code []byte
+}
+
+func (*mermaidBlock) Kind() ast.NodeKind { return mermaidKind }
+
+func (n *mermaidBlock) Dump(src []byte, level int) { ast.DumpHelper(n, src, level, nil, nil) }
+
+// mermaidExt wires the transformer and the renderer below into goldmark.
+type mermaidExt struct{}
+
+func (mermaidExt) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(parser.WithASTTransformers(util.Prioritized(mermaidExt{}, 100)))
+	m.Renderer().AddOptions(renderer.WithNodeRenderers(util.Prioritized(mermaidExt{}, 100)))
+}
+
+// Transform replaces every ```mermaid code block with a mermaidBlock node, so
+// the syntax-highlighting renderer never sees it, and records in the parser
+// context that the document uses Mermaid.
+func (mermaidExt) Transform(doc *ast.Document, reader text.Reader, pc parser.Context) {
+	src := reader.Source()
+
+	var blocks []*ast.FencedCodeBlock
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if fcb, ok := n.(*ast.FencedCodeBlock); ok &&
+			bytes.EqualFold(fcb.Language(src), []byte("mermaid")) {
+			blocks = append(blocks, fcb)
+		}
+		return ast.WalkContinue, nil
+	})
+
+	for _, fcb := range blocks {
+		var code bytes.Buffer
+		for i := 0; i < fcb.Lines().Len(); i++ {
+			line := fcb.Lines().At(i)
+			code.Write(line.Value(src))
+		}
+		fcb.Parent().ReplaceChild(fcb.Parent(), fcb, &mermaidBlock{Code: code.Bytes()})
+	}
+	if len(blocks) > 0 {
+		pc.Set(mermaidFound, true)
+	}
+}
+
+// RegisterFuncs implements renderer.NodeRenderer.
+func (mermaidExt) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
+	reg.Register(mermaidKind, renderMermaid)
+}
+
+// renderMermaid emits the diagram source inside the <pre class="mermaid">
+// element that mermaid.js picks up and replaces with the rendered SVG.
+func renderMermaid(w util.BufWriter, _ []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	_, _ = w.WriteString(`<pre class="mermaid">`)
+	_, _ = w.Write(util.EscapeHTML(node.(*mermaidBlock).Code))
+	_, _ = w.WriteString("</pre>\n")
+	return ast.WalkSkipChildren, nil
 }
 
 // highlightCSS builds the chroma stylesheet for fenced code blocks, using
@@ -228,15 +311,18 @@ func (a *app) handleView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var buf bytes.Buffer
-	if err := a.md.Convert(src, &buf); err != nil {
+	pc := parser.NewContext()
+	if err := a.md.Convert(src, &buf, parser.WithContext(pc)); err != nil {
 		http.Error(w, "could not render Markdown", http.StatusInternalServerError)
 		log.Printf("render %s: %v", name, err)
 		return
 	}
+	mermaid, _ := pc.Get(mermaidFound).(bool)
 
 	a.render(w, "view", map[string]any{
-		"Title": titleFromBytes(src, name),
-		"Body":  template.HTML(buf.String()),
+		"Title":   titleFromBytes(src, name),
+		"Body":    template.HTML(buf.String()),
+		"Mermaid": mermaid,
 	})
 }
 
@@ -493,6 +579,9 @@ body { margin: 0; background-color: #ffffff; }
 .badge { color: #59636e; border: 1px solid #d1d9e0; border-radius: 6px;
   font-size: .7em; padding: 1px 5px; margin-left: 8px; vertical-align: middle; }
 @media (prefers-color-scheme: dark) { .badge { color: #8b949e; border-color: #3d444d; } }
+.markdown-body pre.mermaid { background-color: transparent; padding: 0;
+  text-align: center; overflow-x: auto; }
+.markdown-body pre.mermaid svg { max-width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -500,7 +589,15 @@ body { margin: 0; background-color: #ffffff; }
 {{end}}
 
 {{define "foot"}}</article>
-</body>
+{{if .Mermaid}}<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({
+  startOnLoad: false,
+  theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+});
+await mermaid.run({ querySelector: "pre.mermaid" });
+</script>
+{{end}}</body>
 </html>{{end}}
 
 {{define "index"}}{{template "head" "INDEX"}}
@@ -513,10 +610,10 @@ body { margin: 0; background-color: #ffffff; }
 {{else}}
 <p>このディレクトリに .md / .html ファイルはありません。</p>
 {{end}}
-{{template "foot"}}{{end}}
+{{template "foot" .}}{{end}}
 
 {{define "view"}}{{template "head" .Title}}
 <p><a href="/">&larr; INDEX</a></p>
 {{.Body}}
-{{template "foot"}}{{end}}
+{{template "foot" .}}{{end}}
 `
